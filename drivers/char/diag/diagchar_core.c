@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2016, 2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -322,9 +322,9 @@ static int diagchar_open(struct inode *inode, struct file *file)
 	return -ENOMEM;
 
 fail:
-	mutex_unlock(&driver->diagchar_mutex);
 	driver->num_clients--;
-	pr_alert("diag: Insufficient memory for new client");
+	mutex_unlock(&driver->diagchar_mutex);
+	pr_err_ratelimited("diag: Insufficient memory for new client");
 	return -ENOMEM;
 }
 
@@ -1063,14 +1063,18 @@ static int diag_ioctl_lsm_deinit(void)
 {
 	int i;
 
+	mutex_lock(&driver->diagchar_mutex);
 	for (i = 0; i < driver->num_clients; i++)
 		if (driver->client_map[i].pid == current->tgid)
 			break;
 
-	if (i == driver->num_clients)
+	if (i == driver->num_clients) {
+		mutex_unlock(&driver->diagchar_mutex);
 		return -EINVAL;
+	}
 
 	driver->data_ready[i] |= DEINIT_TYPE;
+	mutex_unlock(&driver->diagchar_mutex);
 	wake_up_interruptible(&driver->wait_q);
 
 	return 1;
@@ -1759,7 +1763,7 @@ static ssize_t diagchar_write(struct file *file, const char __user *buf,
 		/* Check masks for On-Device logging */
 		if (driver->mask_check) {
 			if (!mask_request_validate(driver->user_space_data_buf +
-							 token_offset)) {
+							 token_offset, payload_size)) {
 				pr_alert("diag: mask request Invalid\n");
 				return -EFAULT;
 			}
@@ -2159,15 +2163,19 @@ static int diag_real_time_info_init(void)
 	return 0;
 }
 
-int mask_request_validate(unsigned char mask_buf[])
+int mask_request_validate(unsigned char mask_buf[], int len)
 {
 	uint8_t packet_id;
 	uint8_t subsys_id;
 	uint16_t ss_cmd;
 
+	if (len <= 0)
+		return 0;
 	packet_id = mask_buf[0];
 
 	if (packet_id == 0x4B) {
+		if (len < 2*sizeof(uint8_t) + sizeof(uint16_t))
+			return 0;
 		subsys_id = mask_buf[1];
 		ss_cmd = *(uint16_t *)(mask_buf + 2);
 		/* Packets with SSID which are allowed */
